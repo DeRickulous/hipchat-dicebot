@@ -1,10 +1,20 @@
 import webapp2
+from webapp2_extras import sessions
+
+from google.appengine.ext import ndb
+
 import json
 import random
 import math
 import re
+import time
+
+class LastHelpDate(ndb.Model):
+	room_id = ndb.StringProperty()
+	time = ndb.IntegerProperty(indexed=False)
 
 class MainPage(webapp2.RequestHandler):
+
 	# some useful properties of the content:
 	# message date: content['item']['message']['date']
 	# user_id: content['item']['message']['from']['id']
@@ -12,15 +22,47 @@ class MainPage(webapp2.RequestHandler):
 	# message: content['item']['message']['message']
 	def jsonify_request(self):
 		return json.loads(self.request.body_file.read())
-		#return json.loads('{"event": "room_message", "item": {"message": {"date": "2015-01-20T22:45:06.662545+00:00", "from": {"id": "1661743", "mention_name": "Blinky", "name": "Blinky the Three Eyed Fish"}, "id": "00a3eb7f-fac5-496a-8d64-a9050c712ca1", "mentions": [], "message": "roll top 1 of 2d20 +1 to save versus death", "type": "message"}, "room": {"id": "1147567", "name": "The Weather Channel"}}, "webhook_id": "578829"}')
+		#return json.loads('{"event": "room_message", "item": {"message": {"date": "2015-01-20T22:45:06.662545+00:00", "from": {"id": "1661743", "mention_name": "Blinky", "name": "Blinky the Three Eyed Fish"}, "id": "00a3eb7f-fac5-496a-8d64-a9050c712ca1", "mentions": [], "message": "oll top 1 of 2d20 +1 to save versus death", "type": "message"}, "room": {"id": "1147567", "name": "The Weather Channel"}}, "webhook_id": "578829"}')
+
+	def post_help_response(self, color, room_id):
+		now = int(time.time())
+		last_help_date = self.get_last_help_date(room_id)
+		if (not last_help_date) or ((now - last_help_date) >= 10):
+			self.set_last_help_date(room_id)
+			self.post_response(color, '''HipChat Dicebot usage:
+			   /roll {keep} {m}d{n} {bonus} {message}
+			   m: number of dice to roll
+			   n: number of sides per die
+			   keep: throws away a number of dice ('top # of', 'bot # of', 'bottom # of')
+			   bonus: add or subtract a bonus to the final roll ('+#', '-#')
+			   message: apply a certain text message to the roll response
+			This help response will only display every 60 seconds.''')
 
 	def post_response(self, color, message):
 		self.response.headers['Content-Type'] = 'application/json'
-		self.response.write('{"color": "%s", "message": "%s", "message_format": "text"}' % (color, message));
+		jsonValue = {'color': color, 'message': message, 'message_format': 'text'}
+		self.response.write(json.dumps(jsonValue))
 
-	def parse_json_variables(self, json):
-		name = json['item']['message']['from']['name']
-		m = re.search('rolls?\s+(?:(max|top|min|bot|bottom)\s*(\d+)\s*of\s*)?(\d+)\s*d\s*(\d+)(?:\s*(\+|\-)\s*(\d+))?(?:\s+(.*))?$', json['item']['message']['message'])
+	def get_last_help_date(self, room_id):
+		last_help_dates = LastHelpDate.query(LastHelpDate.room_id==room_id).fetch(1)
+		for last_help_date in last_help_dates:
+			return last_help_date.time
+		return False
+
+	def set_last_help_date(self, room_id):
+		last_help_dates = LastHelpDate.query(LastHelpDate.room_id==room_id).fetch(1)
+		for last_help_date in last_help_dates:
+			last_help_date.time = int(time.time())
+			last_help_date.put()
+			return
+		last_help_date = LastHelpDate()
+		last_help_date.room_id = room_id
+		last_help_date.time = int(time.time())
+		last_help_date.put()
+
+	def parse_json_variables(self, jsonValue):
+		name = jsonValue['item']['message']['from']['name']
+		m = re.search('rolls?\s+(?:(max|top|min|bot|bottom)\s*(\d+)\s*of\s*)?(\d+)\s*d\s*(\d+)(?:\s*(\+|\-)\s*(\d+))?(?:\s+(.*))?$', jsonValue['item']['message']['message'])
 		keep_top = False
 		keep = 0;
 		count = 0
@@ -46,8 +88,8 @@ class MainPage(webapp2.RequestHandler):
 				message = m.group(7)
 		return (process, keep_top, keep, count, die_size, modifier, name, message)
 
-	def process_json(self, json):
-		process, keep_top, keep, count, die_size, modifier, name, message = self.parse_json_variables(json)
+	def process_json(self, jsonValue):
+		process, keep_top, keep, count, die_size, modifier, name, message = self.parse_json_variables(jsonValue)
 		if (not process):
 			return False
 		if (keep and keep_top):
@@ -70,7 +112,6 @@ class MainPage(webapp2.RequestHandler):
 			message = ' ' + message
 		else:
 			message = ''
-			
 
 		total, results = self.roll_dice2(keep, keep_top, count, die_size)
 		total = total + modifier
@@ -125,14 +166,21 @@ class MainPage(webapp2.RequestHandler):
 		return (total, result_string)
 
 	def post(self):
-		json = self.jsonify_request()
-		message = self.process_json(json)
+		jsonValue = self.jsonify_request()
+		message = self.process_json(jsonValue)
 		if (message):
 			self.post_response('green', message)
+		else:
+			self.post_help_response('green', str(jsonValue['item']['room']['id']))
 
 	def get(self):
 		self.response.headers['Content-Type'] = 'text/html'
 		self.response.write('<form method="POST"><input type="text" name="x"></input><input type="submit"></input></form>');
+
+config = {}
+config['webapp2_extras.sessions'] = {
+    'secret_key': 'my-super-secret-key',
+}
 
 app = webapp2.WSGIApplication([
 	('/', MainPage),
