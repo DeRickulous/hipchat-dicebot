@@ -22,21 +22,21 @@ class MainPage(webapp2.RequestHandler):
 	# message: content['item']['message']['message']
 	def jsonify_request(self):
 		return json.loads(self.request.body_file.read())
-		#return json.loads('{"event": "room_message", "item": {"message": {"date": "2015-01-20T22:45:06.662545+00:00", "from": {"id": "1661743", "mention_name": "Blinky", "name": "Blinky the Three Eyed Fish"}, "id": "00a3eb7f-fac5-496a-8d64-a9050c712ca1", "mentions": [], "message": "oll top 1 of 2d20 +1 to save versus death", "type": "message"}, "room": {"id": "1147567", "name": "The Weather Channel"}}, "webhook_id": "578829"}')
+		#return json.loads('{"event": "room_message", "item": {"message": {"date": "2015-01-20T22:45:06.662545+00:00", "from": {"id": "1661743", "mention_name": "Blinky", "name": "Blinky the Three Eyed Fish"}, "id": "00a3eb7f-fac5-496a-8d64-a9050c712ca1", "mentions": [], "message": "/roll 10d6", "type": "message"}, "room": {"id": "1147567", "name": "The Weather Channel"}}, "webhook_id": "578829"}')
 
 	def post_help_response(self, color, room_id):
 		now = int(time.time())
 		last_help_date = self.get_last_help_date(room_id)
 		if (not last_help_date) or ((now - last_help_date) >= 10):
 			self.set_last_help_date(room_id)
-			self.post_response(color, '''HipChat Dicebot usage:
-			   /roll {keep} {m}d{n} {bonus} {message}
+			self.post_response(color, '''Usage: /roll {keep} {m}d{n} {explode} {bonus} {message}
 			   m: number of dice to roll
 			   n: number of sides per die
-			   keep: throws away a number of dice ('top # of', 'bot # of', 'bottom # of')
-			   bonus: add or subtract a bonus to the final roll ('+#', '-#')
-			   message: apply a certain text message to the roll response
-			This help response will only display every 60 seconds.''')
+			   keep: throws away a number of dice ('top # of', 'bot # of', 'bottom # of') [optional]
+			   explode: a certain number of (or all) dice may "explode" ('x', 'x#') [optional]
+			   bonus: add or subtract a bonus to the final roll ('+#', '-#') [optional]
+			   message: apply a certain text message to the roll response [optional]
+			(This help response will only display every 60 seconds.)''')
 
 	def post_response(self, color, message):
 		self.response.headers['Content-Type'] = 'application/json'
@@ -62,11 +62,12 @@ class MainPage(webapp2.RequestHandler):
 
 	def parse_json_variables(self, jsonValue):
 		name = jsonValue['item']['message']['from']['name']
-		m = re.search('rolls?\s+(?:(max|top|min|bot|bottom)\s*(\d+)\s*of\s*)?(\d+)\s*d\s*(\d+)(?:\s*(\+|\-)\s*(\d+))?(?:\s+(.*))?$', jsonValue['item']['message']['message'])
+		m = re.search('rolls?\s+(?:(max|top|min|bot|bottom)\s*(\d+)\s*of\s*)?(\d+)\s*d\s*(\d+)(?:\s*x(\d*))?(?:\s*(\+|\-)\s*(\d+))?(?:\s*(.*))?$', jsonValue['item']['message']['message'])
 		keep_top = False
 		keep = 0;
 		count = 0
 		die_size = 0
+		explode_count = 0
 		modifier = 0
 		message = False
 		process = False
@@ -80,16 +81,20 @@ class MainPage(webapp2.RequestHandler):
 				count = int(m.group(3))
 			if (m.group(4)):
 				die_size = int(m.group(4))
-			if (m.group(6)):
-				modifier = int(m.group(6))
-			if (m.group(5)) == '-':
-				modifier = 0 - modifier
+			if (m.group(5) == ''):
+				explode_count = count
+			elif (m.group(5)):
+				explode_count = min(count, int(m.group(5)));
 			if (m.group(7)):
-				message = m.group(7)
-		return (process, keep_top, keep, count, die_size, modifier, name, message)
+				modifier = int(m.group(7))
+			if (m.group(6)) == '-':
+				modifier = 0 - modifier
+			if (m.group(8)):
+				message = m.group(8)
+		return (process, keep_top, keep, count, die_size, explode_count, modifier, name, message)
 
 	def process_json(self, jsonValue):
-		process, keep_top, keep, count, die_size, modifier, name, message = self.parse_json_variables(jsonValue)
+		process, keep_top, keep, count, die_size, explode_count, modifier, name, message = self.parse_json_variables(jsonValue)
 		if (not process):
 			return False
 		if (keep and keep_top):
@@ -97,6 +102,7 @@ class MainPage(webapp2.RequestHandler):
 		elif (keep):
 			keep_string = ' bottom %i of' % keep
 		else:
+			keep = count
 			keep_string = ''
 		if (count <= 0):
 			return '%s tries to roll zero dice, but just ends up looking silly.' % name
@@ -112,66 +118,67 @@ class MainPage(webapp2.RequestHandler):
 			message = ' ' + message
 		else:
 			message = ''
+		if (explode_count > 0):
+			explode_string = ' (%i exploding)' % explode_count
+		else:
+			explode_string = ''
 
-		total, results = self.roll_dice2(keep, keep_top, count, die_size)
+		total, results = self.roll_dice(keep, keep_top, count, explode_count, die_size)
 		total = total + modifier
 
-		return '%s rolls%s:%s %id%i [%s]%s = %i' % (name, message, keep_string, count, die_size, results, modifier_string, total)
+		return '%s rolls%s:%s %id%i [%s]%s%s = %i' % (name, message, keep_string, count, die_size, results, explode_string, modifier_string, total)
 
 	# returns a tuple in the form: (12, '4, 1, 5, 2')
-	def roll_dice(self, keep, keep_top, count, die_size):
-		results = ''
-		total = 0
+	def roll_dice(self, keep, keep_top, count, explode_count, die_size):
+		results = []
 		for i in range(0, count):
-			result = random.randint(1, die_size)
-			total = total + result
-			if (i < 20 or count <= 25):
-				if i > 0:
-					results = results + ', '
-				results = results + str(result)
-		if count > 25:
-			results = results + ' and %i more...' % (count - 20)
-		return (total, results)
-
-	def roll_dice2(self, keep, keep_top, count, die_size):
-		results = [None] * count
-		total = 0
-		for i in range(0, count):
-			result = random.randint(1, die_size)
-			results[i] = [i, result, False]
-			total = total + result
+			results.append([i, self.roll_die(die_size, i < explode_count), False])
+		# sort the list by the total of the result array
+		sum = lambda x, y: x + y
 		if (keep_top):
-			results = sorted(results, key=lambda x: (0 - x[1]))
+			results = sorted(results, key=lambda x: (0 - reduce(sum, x[1])))
 		else:
-			results = sorted(results, key=lambda x: x[1])
-		if (keep):
-			total = 0
-			for i in range(0, keep):
-				results[i][2] = True
-				total = total + results[i][1]
-			results = sorted(results, key=lambda x: x[0])
+			results = sorted(results, key=lambda x: reduce(sum, x[1]))
+		# iterate over the first [keep] records of the list, simultaneously flagging (third element of subarray) and summing (second element of subarray)
+		total = 0
+		for i in range(0, keep):
+			results[i][2] = True
+			total = total + reduce(sum, results[i][1])
+		# return the array to its original order
+		results = sorted(results, key=lambda x: x[0])
+		# construct the result string
 		result_string = ''
 		if (count <= 25):
 			loop_max = count
 		else:
 			loop_max = 20
+		# iterate over the results (all of them, or only 20 if there are more than 25)
 		for i in range(0, loop_max):
 			if (i > 0):
 				result_string = result_string + ', '
-			result_string = result_string + str(results[i][1])
-			if (results[i][2] and keep):
+			if (len(results[i][1]) == 1):
+				result_string = result_string + str(results[i][1][0])
+			else:
+				result_string = result_string + str(results[i][1])
+			if (results[i][2] and (keep < count)):
 				result_string = result_string + '*'
 		if (count > 25):
 			result_string = result_string + ' and %i more...' % (count - 20)
 		return (total, result_string)
 
+	def roll_die(self, die_size, explode):
+		results = []
+		while ((len(results) == 0) or (explode and (results[len(results) - 1] == die_size))):
+			results.append(random.randint(1, die_size))
+		return results
+
 	def post(self):
 		jsonValue = self.jsonify_request()
 		message = self.process_json(jsonValue)
 		if (message):
-			self.post_response('green', message)
+			self.post_response('gray', message)
 		else:
-			self.post_help_response('green', str(jsonValue['item']['room']['id']))
+			self.post_help_response('gray', str(jsonValue['item']['room']['id']))
 
 	def get(self):
 		self.response.headers['Content-Type'] = 'text/html'
