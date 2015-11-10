@@ -1,4 +1,5 @@
 import webapp2
+import logging
 
 from google.appengine.ext import ndb
 from helpdate import get_time_since_last_help
@@ -12,20 +13,12 @@ import time
 
 class RollPage(webapp2.RequestHandler):
 
-	# some useful properties of the content:
-	# message date: content['item']['message']['date']
-	# user_id: content['item']['message']['from']['id']
-	# user name: content['item']['message']['from']['name']
-	# message: content['item']['message']['message']
-	def jsonify_request(self):
-		return json.loads(self.request.body_file.read())
-		#return json.loads('{"event": "room_message", "item": {"message": {"date": "2015-01-20T22:45:06.662545+00:00", "from": {"id": "1661743", "mention_name": "Blinky", "name": "Blinky the Three Eyed Fish"}, "id": "00a3eb7f-fac5-496a-8d64-a9050c712ca1", "mentions": [], "message": "/roll 10d6", "type": "message"}, "room": {"id": "1147567", "name": "The Weather Channel"}}, "webhook_id": "578829"}')
-
-	def post_help_response(self, color, room_id):
+	def post_help_response(self):
+		room_id = self.request.get('channel_id')
 		last_help_date = get_time_since_last_help(room_id, 0)
 		if (not last_help_date) or (last_help_date >= 60):
 			set_last_help_now(room_id, 0)
-			self.post_response(color, '''Usage: /roll {keep} {m}d{n} {explode} {bonus} {message}
+			self.post_response('''Usage: /roll {keep} {m}d{n} {explode} {bonus} {message}
 			   m: number of dice to roll
 			   n: number of sides per die
 			   keep: throws away a number of dice ('top # of', 'bot # of', 'bottom # of') [optional]
@@ -34,14 +27,15 @@ class RollPage(webapp2.RequestHandler):
 			   message: apply a certain text message to the roll response [optional]
 			(This help response will only display every 60 seconds.)''')
 
-	def post_response(self, color, message):
+	def post_response(self, message):
 		self.response.headers['Content-Type'] = 'application/json'
-		jsonValue = {'color': color, 'message': message, 'message_format': 'text'}
+		jsonValue = {'response_type': 'in_channel', 'text': message}
 		self.response.write(json.dumps(jsonValue))
 
-	def parse_json_variables(self, jsonValue):
-		name = jsonValue['item']['message']['from']['name']
-		m = re.search('rolls?\s+(?:(max|top|min|bot|bottom)\s*(\d+)\s*of\s*)?(\d+)\s*d\s*(\d+)(?:\s*x(\d*))?(?:\s*(\+|\-)\s*(\d+))?(?:\s*(.*))?$', jsonValue['item']['message']['message'])
+	def parse_variables(self):
+		name = self.request.get('user_name')
+		logging.info(self.request.get('text'))
+		m = re.search('\s*(?:(max|top|min|bot|bottom)\s*(\d+)\s*of\s*)?(\d+)\s*d\s*(\d+)(?:\s*x(\d*))?(?:\s*(\+|\-)\s*(\d+))?(?:\s*(.*))?$', self.request.get('text'))
 		keep_top = False
 		keep = 0;
 		count = 0
@@ -72,8 +66,8 @@ class RollPage(webapp2.RequestHandler):
 				message = m.group(8)
 		return (process, keep_top, keep, count, die_size, explode_count, modifier, name, message)
 
-	def process_json(self, jsonValue):
-		process, keep_top, keep, count, die_size, explode_count, modifier, name, message = self.parse_json_variables(jsonValue)
+	def process_request(self):
+		process, keep_top, keep, count, die_size, explode_count, modifier, name, message = self.parse_variables()
 		if (not process):
 			return False
 		if (keep and keep_top):
@@ -154,13 +148,13 @@ class RollPage(webapp2.RequestHandler):
 		return results
 
 	def post(self):
-		jsonValue = self.jsonify_request()
-		message = self.process_json(jsonValue)
+		message = self.process_request()
 		if (message):
-			self.post_response('gray', message)
+			self.post_response(message)
 		else:
-			self.post_help_response('gray', str(jsonValue['item']['room']['id']))
+			self.post_help_response()
+		
 
-	#def get(self):
-	#	self.response.headers['Content-Type'] = 'text/html'
-	#	self.response.write('<form method="POST"><input type="text" name="x"></input><input type="submit"></input></form>');
+	def get(self):
+		self.response.headers['Content-Type'] = 'text/html'
+		self.response.write('<form method="POST"><input type="text" name="channel_id"></input><input type="text" name="text"></input><input type="submit"></input></form>');
