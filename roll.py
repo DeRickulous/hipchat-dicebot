@@ -1,10 +1,6 @@
 import webapp2
 import logging
 
-from google.appengine.ext import ndb
-from helpdate import get_time_since_last_help
-from helpdate import set_last_help_now
-
 import json
 import random
 import math
@@ -14,22 +10,20 @@ import time
 class RollPage(webapp2.RequestHandler):
 
 	def post_help_response(self):
-		room_id = self.request.get('channel_id')
-		last_help_date = get_time_since_last_help(room_id, 0)
-		if (not last_help_date) or (last_help_date >= 60):
-			set_last_help_now(room_id, 0)
-			self.post_response('''Usage: /roll {keep} {m}d{n} {explode} {bonus} {message}
-			   m: number of dice to roll
-			   n: number of sides per die
-			   keep: throws away a number of dice ('top # of', 'bot # of', 'bottom # of') [optional]
-			   explode: a certain number of (or all) dice may "explode" ('x', 'x#') [optional]
-			   bonus: add or subtract a bonus to the final roll ('+#', '-#') [optional]
-			   message: apply a certain text message to the roll response [optional]
-			(This help response will only display every 60 seconds.)''')
+		self.post_response('''Usage: /roll {keep} {m}d{n} {explode} {bonus} {message}
+		   m: number of dice to roll
+		   n: number of sides per die
+		   keep: throws away a number of dice ('top # of', 'bot # of', 'bottom # of') [optional]
+		   explode: a certain number of (or all) dice may "explode" ('x', 'x#') [optional]
+		   bonus: add or subtract a bonus to the final roll ('+#', '-#') [optional]
+		   message: apply a certain text message to the roll response [optional]''', False)
 
-	def post_response(self, message):
+	def post_response(self, message, in_channel):
 		self.response.headers['Content-Type'] = 'application/json'
-		jsonValue = {'response_type': 'in_channel', 'text': message}
+		if (in_channel):
+			jsonValue = {'response_type': 'in_channel', 'text': message}
+		else:
+			jsonValue = {'response_type': 'ephemeral', 'text': message}
 		self.response.write(json.dumps(jsonValue))
 
 	def parse_variables(self):
@@ -78,9 +72,9 @@ class RollPage(webapp2.RequestHandler):
 			keep = count
 			keep_string = ''
 		if (count <= 0):
-			return '%s tries to roll zero dice, but just ends up looking silly.' % name
+			return '@%s tries to roll zero dice, but just ends up looking silly.' % name
 		if (die_size <= 0):
-			return '%s tries to roll zero-sided dice, but they never stop rolling...' % name
+			return '@%s tries to roll zero-sided dice, but they never stop rolling...' % name
 		elif (die_size == 1):
 			explode_count = 0
 		if (modifier > 0):
@@ -101,7 +95,9 @@ class RollPage(webapp2.RequestHandler):
 		total, results = self.roll_dice(keep, keep_top, count, explode_count, die_size)
 		total = total + modifier
 
-		return '%s rolls%s:%s %id%i [%s]%s%s = %i' % (name, message, keep_string, count, die_size, results, explode_string, modifier_string, total)
+		if (total.is_integer()):
+			total = int(total)
+		return '@%s rolls%s:%s %id%i [%s]%s%s = %s' % (name, message, keep_string, count, die_size, results, explode_string, modifier_string, str(total))
 
 	# returns a tuple in the form: (12, '4, 1, 5, 2')
 	def roll_dice(self, keep, keep_top, count, explode_count, die_size):
@@ -115,7 +111,7 @@ class RollPage(webapp2.RequestHandler):
 		else:
 			results = sorted(results, key=lambda x: reduce(sum, x[1]))
 		# iterate over the first [keep] records of the list, simultaneously flagging (third element of subarray) and summing (second element of subarray)
-		total = 0
+		total = 0.0
 		for i in range(0, keep):
 			results[i][2] = True
 			total = total + reduce(sum, results[i][1])
@@ -150,11 +146,12 @@ class RollPage(webapp2.RequestHandler):
 	def post(self):
 		message = self.process_request()
 		if (message):
-			self.post_response(message)
+			logging.info(message)
+			self.post_response(message, True)
 		else:
 			self.post_help_response()
 		
 
-	def get(self):
-		self.response.headers['Content-Type'] = 'text/html'
-		self.response.write('<form method="POST"><input type="text" name="channel_id"></input><input type="text" name="text"></input><input type="submit"></input></form>');
+	#def get(self):
+	#	self.response.headers['Content-Type'] = 'text/html'
+	#	self.response.write('<form method="POST"><input type="text" name="channel_id"></input><input type="text" name="text"></input><input type="submit"></input></form>');
